@@ -3,20 +3,24 @@ import pandas as pd
 from unittest import main, TestCase
 from datetime import datetime, timedelta
 from modules.helpers import ECDF
+from faker import Faker
 
 class StudentsGenerator():
     def __init__(self, size):
+        faker = Faker()
         self._size = size
-        self._students = pd.DataFrame({"student_id": np.arange(1, size + 1)})
+        self._students = pd.DataFrame({"student_id": np.arange(100001, size + 100001)})
+        names = [faker.name() for i in range(size)]        
+        self._students['name'] = np.array(names)
         self._students['weight'] = np.random.exponential(1, size=size) # the avg weight by student is 1 but most of them weight less (exponential distribution)
+        
 
     def get_size(self):
         return self._size
 
     def get_students(self):
-        return self._students[['student_id']] # returning only public columns        
+        return self._students[['student_id', 'name']] # returning only public columns        
         
-    
 
 class TestStudents(TestCase):
     def test_if_creates_df_correctly(self):
@@ -81,8 +85,22 @@ class SessionsGenerator():
         # TODO: PROBLEMA PRA RESOLVER: se um tutor desocupar e soh percebermos 2 horas depois pq teve um gap de sessions, 
         # qual horario vamos colocar no "connected_at", se eu nao salvo o horario que um tutor baixou de 5 atendimentos?                
         # nao é melhor fazer um loop nos segundos e verificar de segundo em segundo? ou a cada 5 segundos? 
-        for time in self._sessions['started_at']:
-            
+        #for time in self._sessions['started_at']:
+
+        # EXPERIMENTING WITH PERIODIC PROCESS:
+        start_at = self._sessions['started_at'].min()
+        end_at = self._sessions['started_at'].max() + timedelta(hours=2) # keep processing after 2 hours to make sure everyone is processed                
+        date_range = pd.date_range(start_at, end_at, freq='30S') # periods of 10 seconds
+        shifts_changes = self._scheduler.work_shifts_for_date_range(start_at, end_at)
+        shifts_changes = iter(shifts_changes)
+        next_shift_change = next(shifts_changes)
+                
+        counter = 0
+        total = len(date_range)
+        for time in date_range:
+            counter += 1
+            print(str(round(counter/total*100)) + '%', end='\r')
+
             # check_finished sessions
             self.check_finished_sessions(time)
 
@@ -90,7 +108,15 @@ class SessionsGenerator():
             #self._tutors_gen.check_tutors_to_unblock()
 
             # check_tutors_status
-            self._tutors_gen.check_tutors_statuses(time)
+            if next_shift_change is not None and time >= next_shift_change:
+                #print("Shift change: ", next_shift_change, " AT ", time) 
+                self._tutors_gen.check_tutors_statuses(time)
+                try:
+                    next_shift_change = next(shifts_changes)
+                except:
+                    #print("Shifits finished!")
+                    next_shift_change = None
+
             
             # this query makes sure we revisit sessions that could not have a tutor assigned
             sessions_to_process = self._sessions.query("@time >= started_at and status == 'Queued'")
@@ -102,10 +128,11 @@ class SessionsGenerator():
                 # assign a tutor
                 tutor_id = self._tutors_gen.assign_a_tutor(row['subject'])                
                 if tutor_id is not None:
+                    #print("Processing session:", idx) 
                     self._sessions.loc[idx, 'tutor_id'] = tutor_id
                     self._sessions.loc[idx, 'status'] = 'Active'
                     self._sessions.loc[idx, 'connected_at'] = time
-                    self._sessions.loc[idx, 'finished_at'] = time + timedelta(minutes=row['duration_min'])
+                    self._sessions.loc[idx, 'finished_at'] = time + timedelta(minutes=row['duration_min'])            
         
         # finish processing
         self._sessions['wait_time'] = self._sessions['connected_at'] - self._sessions['started_at']
@@ -118,8 +145,6 @@ class SessionsGenerator():
         self._sessions.loc[sessions_to_finish.index, 'status'] = 'Finished'        
         for idx, row in sessions_to_finish.iterrows():
             self._tutors_gen.unassign_a_tutor(row['tutor_id'])
-        
-    
 
 class TestSessions(TestCase):
     def test_if_creates_df_correctly(self):
@@ -179,9 +204,12 @@ class TutorsGenerator():
     MAX_SESSIONS_BY_TUTOR = 5
     
     def __init__(self, size, subjects_gen):
+        faker = Faker()  
+        names = [faker.name() for i in range(size)]                
         self._subjects_gen = subjects_gen
         self._tutors = pd.DataFrame({
                         'tutor_id': np.arange(1, size + 1),
+                        'name': np.array(names),
                         'status': np.full(size, 'Offline'),
                         'active_sessions': np.full(size, 0)
                        })
@@ -233,8 +261,11 @@ class TutorsGenerator():
         
         # Unblocking
         if self._tutors.loc[tutor_id, 'status'] == 'Blocked':
-            self._tutors.loc[tutor_id, 'status'] = 'Available'            
-
+            self._tutors.loc[tutor_id, 'status'] = 'Available'
+        
+        # Signing_off
+        if self._tutors.loc[tutor_id, 'status'] == 'Leaving' and self._tutors.loc[tutor_id, 'active_sessions'] == 0:
+            self._tutors.loc[tutor_id, 'status'] = 'Offline'
 
 
 
@@ -263,7 +294,14 @@ class Scheduler():
         weights = [1/w for w in weights] # inverting the weight of the probability
         self._rest_days = pd.DataFrame({'day': days, 'weight': weights})         
         
-    
+    def work_shifts_for_date_range(self, start_dt, end_dt):
+        distinct_shifts = self._work_shifts['starts_at'].unique()
+        times = [datetime.strptime(time_string, '%H:%M:%S').time() for time_string in distinct_shifts]
+        deltas = [timedelta(hours=time.hour, minutes=time.minute, seconds=time.second) for time in times]
+        date_range = pd.date_range(start_dt.date(), end_dt.date())
+        shifts = [dt + delta for dt in date_range for delta in deltas]
+        return shifts
+
     def generate_sessions_count(self, date, students_count):
         day_of_week = date.strftime('%A')
         avg_pct_sessions = self._avg_pct_sessions_by_day[day_of_week]
