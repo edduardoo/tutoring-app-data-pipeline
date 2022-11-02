@@ -87,14 +87,9 @@ class SessionsGenerator():
     def process(self, frequence):
         if self._sessions is None:
             print("Sessions have not been generated yet!")
-            return
+            return        
 
-        # TODO: PROBLEMA PRA RESOLVER: se um tutor desocupar e soh percebermos 2 horas depois pq teve um gap de sessions, 
-        # qual horario vamos colocar no "connected_at", se eu nao salvo o horario que um tutor baixou de 5 atendimentos?                
-        # nao é melhor fazer um loop nos segundos e verificar de segundo em segundo? ou a cada 5 segundos? 
-        #for time in self._sessions['started_at']:
-
-        # EXPERIMENTING WITH PERIODIC PROCESS:
+        # PERIODIC PROCESS:
         start_at = self._sessions['started_at'].min()
         end_at = self._sessions['started_at'].max() + timedelta(hours=2) # keep processing after 2 hours to make sure everyone is processed                
         date_range = pd.date_range(start_at, end_at, freq=frequence) # (e.g. '10S' means periods of 10 seconds)
@@ -140,7 +135,7 @@ class SessionsGenerator():
                     self._sessions.loc[idx, 'tutor_id'] = tutor_id
                     self._sessions.loc[idx, 'status'] = 'Active'
                     self._sessions.loc[idx, 'connected_at'] = time
-                    self._sessions.loc[idx, 'finished_at'] = time + timedelta(minutes=row['duration_min'])            
+                    self._sessions.loc[idx, 'finished_at'] = time + timedelta(minutes=row['duration_min'])
         
         # finish processing
         self._sessions['wait_time'] = self._sessions['connected_at'] - self._sessions['started_at']

@@ -1,5 +1,3 @@
-
-#import datetime
 from google.cloud import bigquery
 import pandas
 import pytz
