@@ -6,20 +6,24 @@ from modules.helpers import ECDF
 from faker import Faker
 
 class StudentsGenerator():
-    def __init__(self, size):
+    def __init__(self, size, created_at = None):
+        if created_at is None:
+            created_at = datetime.now()
         faker = Faker()
         self._size = size
         self._students = pd.DataFrame({"student_id": np.arange(100001, size + 100001)})
         names = [faker.name() for i in range(size)]        
         self._students['name'] = np.array(names)
         self._students['weight'] = np.random.exponential(1, size=size) # the avg weight by student is 1 but most of them weight less (exponential distribution)
+        self._students['created_at'] = created_at
+        self._students['updated_at'] = created_at
         
 
     def get_size(self):
         return self._size
 
     def get_students(self):
-        return self._students[['student_id', 'name']] # returning only public columns        
+        return self._students.drop(['weight'], axis=1) # returning only public columns        
         
 
 class TestStudents(TestCase):
@@ -41,9 +45,11 @@ class SessionsGenerator():
         self._scheduler = Scheduler()
         self._times_generator = SessionTimesGenerator()
         self._sessions = None
+        self._next_session_id = 100000
         
     def get_sessions(self):
-        return self._sessions
+        return self._sessions.drop(['duration_min', 'wait_time'], axis=1)
+
 
     def _generate_sessions_for_date(self, date):
                 
@@ -51,11 +57,12 @@ class SessionsGenerator():
         if number_of_sessions == 0:
             return None
         students_sample = self._students_gen._students.sample(n=number_of_sessions, replace=True, weights='weight', ignore_index=True)
-        sessions = pd.DataFrame({'date': np.full(number_of_sessions, date)})
+        sessions = pd.DataFrame({'session_id': range(self._next_session_id, self._next_session_id + number_of_sessions), 'date': np.full(number_of_sessions, date)})
+        self._next_session_id = self._next_session_id + number_of_sessions
         sessions = pd.concat([sessions, students_sample], axis=1)
         sessions['hours'] = self._times_generator.sample_session_times(number_of_sessions)       
         sessions['started_at'] = sessions.apply(lambda row: row['date'] + timedelta(hours=row['hours']), axis=1)                
-        sessions['subject'] = self._subjects_gen.sample(len(sessions))
+        sessions['subject_id'] = self._subjects_gen.sample(len(sessions))
         sessions['duration_min'] = np.random.gamma(4, 4, size=len(sessions)) # session duration, inline sampling
         sessions['status'] = 'Queued'
         sessions['tutor_id'] = None
@@ -64,9 +71,9 @@ class SessionsGenerator():
         sessions['wait_time'] = None
         sessions['wait_time'] = sessions['wait_time'].astype('timedelta64[ns]')
         sessions['finished_at'] = None
-        sessions = sessions.sort_values('started_at')
+        sessions['finished_at'] = sessions['finished_at'].astype('datetime64[ns]')
 
-        return sessions[['started_at', 'student_id', 'subject', 'duration_min', 'status', 'tutor_id', 'connected_at', 'finished_at']]
+        return sessions[['session_id', 'started_at', 'student_id', 'subject_id', 'duration_min', 'status', 'tutor_id', 'connected_at', 'finished_at']]
 
     def generate_sessions_for_date_range(self, start_date, end_date):
         date_range = pd.date_range(start_date, end_date)
@@ -77,7 +84,7 @@ class SessionsGenerator():
             
         self._sessions = sessions_range
 
-    def process(self):
+    def process(self, frequence):
         if self._sessions is None:
             print("Sessions have not been generated yet!")
             return
@@ -90,7 +97,8 @@ class SessionsGenerator():
         # EXPERIMENTING WITH PERIODIC PROCESS:
         start_at = self._sessions['started_at'].min()
         end_at = self._sessions['started_at'].max() + timedelta(hours=2) # keep processing after 2 hours to make sure everyone is processed                
-        date_range = pd.date_range(start_at, end_at, freq='30S') # periods of 10 seconds
+        date_range = pd.date_range(start_at, end_at, freq=frequence) # (e.g. '10S' means periods of 10 seconds)
+        date_range = date_range.to_pydatetime()
         shifts_changes = self._scheduler.work_shifts_for_date_range(start_at, end_at)
         shifts_changes = iter(shifts_changes)
         next_shift_change = next(shifts_changes)
@@ -126,7 +134,7 @@ class SessionsGenerator():
             for idx, row in sessions_to_process.iterrows():
                 #print("Processing session:", idx)            
                 # assign a tutor
-                tutor_id = self._tutors_gen.assign_a_tutor(row['subject'])                
+                tutor_id = self._tutors_gen.assign_a_tutor(row['subject_id'])                
                 if tutor_id is not None:
                     #print("Processing session:", idx) 
                     self._sessions.loc[idx, 'tutor_id'] = tutor_id
@@ -184,42 +192,64 @@ class SessionTimesGenerator():
         # This operation is vectorized here: 
         random_percentiles = np.random.random(size)
         samples = [self._ecdf.ppf(r) for r in random_percentiles]
+        samples = sorted(samples)
         return samples
 
 
 class SubjectsGenerator():
-    def __init__(self):
+    def __init__(self, created_at = None):
+        if created_at is None:
+            created_at = datetime.now()
         # demand is a number between 1-5 which represents the level of demand for a subject
         self._subjects = pd.DataFrame({
+                                  'subject_id': range(100, 104),
                                   'subject': ['Math', 'English', 'Biology', 'Chemistry'],
-                                  'demand':  [5, 4, 2, 3]
+                                  'demand':  [5, 4, 2, 3],
+                                  'created_at': np.full(4, created_at),
+                                  'updated_at': np.full(4, created_at)
                                 })
 
+    def get_subjects(self):
+        return self._subjects
+    
     def sample(self, size):
-        samples = self._subjects.sample(size, replace=True, weights='demand')['subject'].reset_index(drop=True)
+        samples = self._subjects.sample(size, replace=True, weights='demand')['subject_id'].reset_index(drop=True)
         return samples
 
 class TutorsGenerator():
         
     MAX_SESSIONS_BY_TUTOR = 5
     
-    def __init__(self, size, subjects_gen):
+    def __init__(self, size, subjects_gen, created_at = None):
+        if created_at is None:
+            created_at = datetime.now()
         faker = Faker()  
         names = [faker.name() for i in range(size)]                
         self._subjects_gen = subjects_gen
         self._tutors = pd.DataFrame({
-                        'tutor_id': np.arange(1, size + 1),
+                        'tutor_id': np.arange(10001, size + 10001),
                         'name': np.array(names),
                         'status': np.full(size, 'Offline'),
                         'active_sessions': np.full(size, 0)
                        })
-        self._tutors['subject'] = subjects_gen.sample(size)
-        self._scheduler = Scheduler()
-        self._tutors = self._scheduler.schedule_work_shifts(self._tutors)
+        self._tutors['subject_id'] = subjects_gen.sample(size)
+        self._tutors = self._tutors.merge(subjects_gen.get_subjects()[['subject_id', 'subject']])
+        self._scheduler = Scheduler()        
+        self._tutors['work_shift_id'] = self._scheduler.schedule_work_shifts(size)
+        self._tutors['rest_day'] = self._scheduler.schedule_rest_day(size)
+        self._tutors = self._tutors.merge(self._scheduler._work_shifts[['work_shift_id', 'starts_at', 'ends_at']]) # tutors full
+        self._tutors['created_at'] = created_at
+        self._tutors['updated_at'] = created_at
         self._tutors.set_index('tutor_id', inplace=True)
         
-    def get_tutors(self):
+    def get_tutors_full(self):
         return self._tutors
+
+    def get_tutors(self):
+        return self._tutors.drop(['subject', 'starts_at', 'ends_at'], axis=1).reset_index()
+    
+    def get_work_shifts(self):
+        return self._scheduler._work_shifts
     
     def sample(self):
         pass
@@ -240,9 +270,9 @@ class TutorsGenerator():
         #print("Tutors to sign in", tutors_to_sign_in.index)
         self._tutors.loc[tutors_to_sign_in.index, 'status'] = 'Available'
     
-    def assign_a_tutor(self, subject):
-        min_sessions_active = self._tutors.query("status == 'Available' and subject == @subject")['active_sessions'].min()
-        tutors_min = self._tutors.query("status == 'Available' and subject == @subject and active_sessions == @min_sessions_active")
+    def assign_a_tutor(self, subject_id):
+        min_sessions_active = self._tutors.query("status == 'Available' and subject_id == @subject_id")['active_sessions'].min()
+        tutors_min = self._tutors.query("status == 'Available' and subject_id == @subject_id and active_sessions == @min_sessions_active")
         
         if len(tutors_min) == 0: # no tutor available
             return None
@@ -270,7 +300,9 @@ class TutorsGenerator():
 
 
 class Scheduler():
-    def __init__(self):
+    def __init__(self, created_at = None):
+        if created_at is None:
+            created_at = datetime.now()
         self._avg_pct_sessions_by_day = { # avg sessions by day as a percentage of students
                         "Monday": 0.12,
                         "Tuesday": 0.13,
@@ -283,17 +315,20 @@ class Scheduler():
         
         # tutors' different work shifts, with the percentage of tutors in each one, and the start and end times
         self._work_shifts = pd.DataFrame({
-                            'working_hours': ['00-08am', '08am-04pm', '04pm-00'],
+                            'work_shift_id': range(1000, 1003),
+                            'label': ['00am-08am', '08am-04pm', '04pm-00am'],
                             'percent_tutors':  [0.05, 0.45, 0.5], 
                             'starts_at': ['00:00:00', '08:00:00', '16:00:00'],
-                            'ends_at':   ['07:59:59', '15:59:59', '23:59:59']
+                            'ends_at':   ['07:59:59', '15:59:59', '23:59:59'],
+                            'created_at': np.full(3, created_at),
+                            'updated_at': np.full(3, created_at)
                             })
 
         # rest days: generating the probabilities for a tutor to rest in each day of the week, based on _avg_pct_sessions_by_day
         days, weights = zip(*self._avg_pct_sessions_by_day.items())
         weights = [1/w for w in weights] # inverting the weight of the probability
-        self._rest_days = pd.DataFrame({'day': days, 'weight': weights})         
-        
+        self._rest_days = pd.DataFrame({'day': days, 'weight': weights})             
+
     def work_shifts_for_date_range(self, start_dt, end_dt):
         distinct_shifts = self._work_shifts['starts_at'].unique()
         times = [datetime.strptime(time_string, '%H:%M:%S').time() for time_string in distinct_shifts]
@@ -309,16 +344,16 @@ class Scheduler():
         return np.random.poisson(avg_sessions)
     
     # sets the work shift and the rest day for each tutor
-    def schedule_work_shifts(self, tutors):
-        work_shifts = self._work_shifts.sample(len(tutors), replace=True, weights='percent_tutors')
-        work_shifts = work_shifts[['working_hours', 'starts_at', 'ends_at']].reset_index(drop=True)
-        work_shifts['rest_day'] = self._rest_days.sample(len(tutors), replace=True, weights='weight')['day'].reset_index(drop=True)                                
+    def schedule_work_shifts(self, size):
+        work_shifts = self._work_shifts.sample(size, replace=True, weights='percent_tutors').reset_index(drop=True)
+        #work_shifts = work_shifts[['label', 'starts_at', 'ends_at']].reset_index(drop=True)
+        #return pd.concat([tutors, work_shifts], axis=1)
+        return work_shifts['work_shift_id']
+
+    def schedule_rest_day(self, size):
+        return self._rest_days.sample(size, replace=True, weights='weight')['day'].reset_index(drop=True)
+   
         
-
-
-        return pd.concat([tutors, work_shifts], axis=1)
-        
-
 
 if __name__ == '__main__':
     #main()
